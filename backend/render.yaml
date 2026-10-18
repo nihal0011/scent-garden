@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: scent-garden-api
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    plan: free
+    healthCheckPath: /health

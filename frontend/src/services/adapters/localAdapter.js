@@ -1,0 +1,34 @@
+import { openDB } from 'idb';
+import { products as seedProducts } from '../../data/products.js';
+const dbPromise = openDB('scent-garden', 1, {upgrade(db){ for(const store of ['products','users','orders','reviews','messages']) if(!db.objectStoreNames.contains(store)) db.createObjectStore(store,{keyPath:'id'}); }});
+const readAll = async store => (await dbPromise).getAll(store);
+const write = async (store, value) => (await dbPromise).put(store,value);
+export async function initialize(){ if(!(await readAll('products')).length) for(const p of seedProducts) await write('products',p); if(!(await readAll('users')).some(u=>u.email==='admin@scentgarden.com')) await write('users',{id:'local-admin',name:'Garden Keeper',email:'admin@scentgarden.com',passwordHash:await hash('Admin@123'),role:'admin',joined:new Date().toISOString(),addresses:[]}); }
+export async function getProducts(){await initialize(); return readAll('products')}
+export async function getProduct(id){return (await getProducts()).find(p=>p.id===id)}
+export async function createUser({name,email,password}){const users=await readAll('users'); email=email.toLowerCase(); if(users.some(u=>u.email===email)) throw Error('That email is already registered'); const user={id:crypto.randomUUID(),name,email,passwordHash:await hash(password),role:'customer',joined:new Date().toISOString(),addresses:[]}; await write('users',user); localStorage.setItem('sg-user',user.id); return safe(user)}
+async function hash(password,salt=crypto.getRandomValues(new Uint8Array(16))){const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveBits']);const bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt,iterations:120000,hash:'SHA-256'},key,256);return `${btoa(String.fromCharCode(...salt))}.${btoa(String.fromCharCode(...new Uint8Array(bits)))}`}
+async function matches(p,h){const [s]=h.split('.');return await hash(p,Uint8Array.from(atob(s),c=>c.charCodeAt(0)))===h}
+const safe=u=>{const {passwordHash,...rest}=u;return rest};
+export async function loginUser({email,password}){const user=(await readAll('users')).find(u=>u.email===email.toLowerCase());if(!user||!await matches(password,user.passwordHash))throw Error('Wrong email or password');localStorage.setItem('sg-user',user.id);return safe(user)}
+export async function logoutUser(){localStorage.removeItem('sg-user');return true}
+export async function getCurrentUser(){const id=localStorage.getItem('sg-user');return safe((await readAll('users')).find(u=>u.id===id)||{})}
+export async function updateProfile(data){const u=await getCurrentUser();if(!u.id)throw Error('Please sign in first');const full=(await readAll('users')).find(x=>x.id===u.id);Object.assign(full,data);await write('users',full);return safe(full)}
+export async function changePassword({oldPassword,newPassword}){const u=(await readAll('users')).find(x=>x.id===localStorage.getItem('sg-user'));if(!u||!await matches(oldPassword,u.passwordHash))throw Error('Current password does not match');u.passwordHash=await hash(newPassword);await write('users',u);return true}
+export async function resetPassword({email}){if(!(await readAll('users')).some(u=>u.email===email))throw Error('We could not find that email');return true}
+export async function saveAddress(address){const u=(await readAll('users')).find(x=>x.id===localStorage.getItem('sg-user'));u.addresses=[...(u.addresses||[]),{...address,id:crypto.randomUUID()}];await write('users',u);return safe(u)}
+export async function createOrder(order){const user=await getCurrentUser();if(!user.id)throw Error('Please sign in to place your order');const products=await getProducts();const items=order.items.map(i=>{const p=products.find(x=>x.id===i.id);if(!p)throw Error('A perfume in your bag is no longer available');const size=[30,50,100].includes(Number(i.size))?Number(i.size):50;return {id:p.id,name:p.name,size,price:Math.round(p.price*size/50),quantity:i.quantity}});const subtotal=items.reduce((s,i)=>s+i.price*i.quantity,0),code=String(order.coupon||'').toUpperCase();if(code==='WELCOME50'&&(await readAll('orders')).some(o=>o.userId===user.id))throw Error('WELCOME50 is just for your first garden order.');const discount=code==='BLOOM10'?Math.round(subtotal*.1):code==='WELCOME50'?50:0,delivery=subtotal-discount>=999?0:49;const result={id:'SG-'+Date.now().toString().slice(-8),userId:user.id,items,address:order.address,payment:order.payment,subtotal,discount,delivery,total:subtotal-discount+delivery,status:'Placed',created:new Date().toISOString()};await write('orders',result);return result}
+export async function getMyOrders(){const u=await getCurrentUser();return (await readAll('orders')).filter(o=>o.userId===u.id)}
+export async function getAllOrders(){return readAll('orders')}
+export async function updateOrderStatus({id,status}){const o=(await readAll('orders')).find(x=>x.id===id);o.status=status;await write('orders',o);return o}
+export async function toggleWishlist(id){const key='sg-wishlist',w=JSON.parse(localStorage.getItem(key)||'[]'),next=w.includes(id)?w.filter(x=>x!==id):[...w,id];localStorage.setItem(key,JSON.stringify(next));return next}
+export async function getWishlist(){return JSON.parse(localStorage.getItem('sg-wishlist')||'[]')}
+export async function addReview(review){const u=await getCurrentUser();if(!u.id)throw Error('Sign in to leave a review');const r={...review,id:crypto.randomUUID(),userId:u.id,name:u.name,date:new Date().toISOString()};await write('reviews',r);return r}
+export async function getReviews(id){return (await readAll('reviews')).filter(r=>r.productId===id)}
+export async function validateCoupon(code,subtotal){const c=code.toUpperCase();if(c==='BLOOM10')return {code:c,discount:Math.round(subtotal*.1)};if(c==='WELCOME50'){const user=await getCurrentUser();if(!user.id)throw Error('Sign in to use your first-order treat.');if((await readAll('orders')).some(o=>o.userId===user.id))throw Error('WELCOME50 is just for your first garden order.');return {code:c,discount:50}}throw Error('That code has wilted. Try BLOOM10 or WELCOME50.')}
+export async function subscribeNewsletter(email){localStorage.setItem('sg-newsletter',email);return true}
+export async function sendMessage(message){await write('messages',{...message,id:crypto.randomUUID()});return true}
+export async function createProduct(product){const p={...product,id:product.id||crypto.randomUUID()};await write('products',p);return p}
+export async function updateProduct(product){await write('products',product);return product}
+export async function deleteProduct(id){return (await dbPromise).delete('products',id)}
+export async function getAdminStats(){const [orders,users,products]=await Promise.all([getAllOrders(),readAll('users'),getProducts()]);return {revenue:orders.reduce((a,o)=>a+o.total,0),orders:orders.length,customers:users.filter(u=>u.role!=='admin').length,products:products.length}}
